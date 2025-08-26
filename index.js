@@ -1,9 +1,11 @@
-// src/index.js
 import dotenv from "dotenv";
 import Groq from "groq-sdk";
 import { getUserDetails } from "./controllers/aiController.js";
+import connectToMongoDB from "./services/conn_mongo.js";
 
 dotenv.config();
+// Connect to MongoDB
+connectToMongoDB();
 
 const MODEL = process.env.GROQ_MODEL || "llama3-8b-8192";
 const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -28,9 +30,6 @@ OBSERVATION { "type": "observation", "observation": { name: "abhishek raghuvansh
 OUTPUT { "type": "output", "output": "abhishek raghuvanshi is 27 year old and lives in dhar." }
 `;
 
-/**
- * Extracts the function name and input from the assistant's response.
- */
 const parseAction = (message) => {
   try {
     const match = message.match(/"function":\s*"(\w+)",\s*"input":\s*"([^"]+)"/);
@@ -42,9 +41,6 @@ const parseAction = (message) => {
   }
 };
 
-/**
- * Calls the correct function based on the function name.
- */
 const callFunction = async (functionName, input) => {
   switch (functionName) {
     case "getUserDetails":
@@ -54,9 +50,6 @@ const callFunction = async (functionName, input) => {
   }
 };
 
-/**
- * Sends a message to the LLM client.
- */
 const sendMessage = async (messages) => {
   const response = await client.chat.completions.create({
     model: MODEL,
@@ -65,9 +58,6 @@ const sendMessage = async (messages) => {
   return response.choices[0]?.message?.content?.trim();
 };
 
-/**
- * Handles full AI interaction cycle with PLAN > ACTION > OBSERVATION > OUTPUT
- */
 const chat = async (userPrompt) => {
   console.log(`🟢 User Prompt: ${userPrompt}`);
 
