@@ -11,7 +11,7 @@ export const getUserDetails = async (params) => {
     query.pan = params.PAN;
   }
   if (params.name) {
-    query.name = { $regex: new RegExp(params.name, "i") }; // Case-insensitive match
+    query.name = { $regex: new RegExp(params.name, "i") };
   }
   if (params.mobile) {
     query.mobile = params.mobile;
