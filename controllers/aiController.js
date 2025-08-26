@@ -1,30 +1,25 @@
 import {find_one2} from "../services/crud_mongo.js"
 
-// export function getUserDetails(user = "") {
-//   const userMap = {
-//     abhishek: {
-//         name: "abhishek raghuvanshi",
-//         age: "27 year",
-//         city: "dhar",
-//     },
-//     vivek: {
-//         name: "vivek raghuvanshi",
-//         age: "12 year",
-//         city: "indore",
-//     },
-//     minakshi: {
-//         name: "minakshi raghuvanshi",
-//         age: "28 year",
-//         city: "bhopal",
-//     }
-//   };
-//   return userMap[user.toLowerCase()] || "User data not available";
-// }
+export const getUserDetails = async (params) => {
+  // Build a dynamic query object
+  const query = {};
+  
+  if (params.clientId) {
+    query.ID = params.clientId;
+  }
+  if (params.PAN) {
+    query.pan = params.PAN;
+  }
+  if (params.name) {
+    query.name = { $regex: new RegExp(params.name, "i") }; // Case-insensitive match
+  }
+  if (params.mobile) {
+    query.mobile = params.mobile;
+  }
 
-export const getUserDetails = async (arnId, clientId) => {
   const param = {
     modelName: "client_batch",
-    where: { arn_id: parseInt(arnId), ID: clientId },
+    where: query,
     select: {
       _id: 1,
       name: 1,
@@ -41,8 +36,8 @@ export const getUserDetails = async (arnId, clientId) => {
     const userDetails = await find_one2(param);
 
     if (!userDetails) {
-      console.log("No user found for arnId:", arnId, "and clientId:", clientId);
-      return { message: "No user found for these IDs." }; // Return a meaningful error message
+      console.log("No user found for the given parameters:", params);
+      return { message: "No user found for these details." }; // Return a meaningful error message
     }
     return userDetails;
   } catch (error) {
