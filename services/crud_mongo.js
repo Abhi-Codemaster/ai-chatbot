@@ -1,5 +1,5 @@
-const mongoose = require('mongoose');
-require('./schema_register');
+import mongoose from 'mongoose';
+// require('./schema_register');
 
 const deleteQuery = async(query_params)=>{
     const { modelName, condition, query_type = "default"} = query_params;
@@ -126,7 +126,7 @@ async function find_all2(query_params){
   return data;
 }
 
-const find_one2 = async(query_params)=>{
+export const find_one2 = async(query_params)=>{
   const { modelName, where = {}, select = {} } = query_params;
 
   let collection = mongoose.connection.db.collection(modelName);
@@ -268,4 +268,4 @@ const find_distinct2 = async ({ modelName, key, where = {} }) => {
 };
 
 
-module.exports = { deleteQuery, insertquery, distinctQuery, find_all, find_one, find_raw, update, count_records, find_distinct, find_distinct2, group_by, project_aggre, find_all2, find_one2, insertquery2, updatequery2, deletequery2, count_records2, mongoAggregate2, joinQuery};
+// module.exports = { deleteQuery, insertquery, distinctQuery, find_all, find_one, find_raw, update, count_records, find_distinct, find_distinct2, group_by, project_aggre, find_all2, find_one2, insertquery2, updatequery2, deletequery2, count_records2, mongoAggregate2, joinQuery};
