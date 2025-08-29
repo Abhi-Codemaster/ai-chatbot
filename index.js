@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import Groq from "groq-sdk";
-import { getUserDetails } from "./controllers/aiController.js";
+import { getUserDetails, calculateAUM, getTransactionDetails } from "./controllers/aiController.js";
 import connectToMongoDB from "./services/conn_mongo.js";
 import readlineSync from "readline-sync";
 import { calculateAge } from "./common/common.js";
@@ -12,15 +12,18 @@ const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // System prompt for determining query type
 const CLASSIFIER_PROMPT = `
-You are a query classifier. Analyze the user's question and determine if it's:
+You are a query classifier. Analyze the user's question and determine:
 
-1. USER_QUERY: Questions about finding user details, client information, or database searches
+1. USER_QUERY → Questions about finding user details, client information, or database searches.
    - Examples: "Find user with PAN ABGPA5303H", "Get details of Abhishek", "Search client by mobile"
 
-2. GENERAL_QUERY: General knowledge questions, explanations, or conversations
-   - Examples: "What is SIP?", "Explain mutual funds", "How does stock market work?", "What is the weather?"
+2. GENERAL_QUERY_SHORT → General knowledge questions where the answer is short, factual, or one-line.
+   - Examples: "What is India's prime minister name?", "Who is Elon Musk?", "What is 2+2?"
 
-Respond with ONLY one word: either "USER_QUERY" or "GENERAL_QUERY"
+3. GENERAL_QUERY_LONG → General knowledge questions where the answer requires explanation or detail.
+   - Examples: "What is SIP?", "Explain mutual funds", "How does stock market work?"
+
+Respond with ONLY one of these labels: "USER_QUERY", "GENERAL_QUERY_SHORT", or "GENERAL_QUERY_LONG"
 
 User question: "{query}"
 `;
@@ -35,21 +38,41 @@ You are an AI assistant specialized in user database queries. Follow this proces
 
 Available tools:
 1. getUserDetails(params: object): object
+2. calculateAUM(params: object): object
+3. getTransactionDetails(params: object): object
 
-Parameters accepted:
+Parameters accepted for getUserDetails:
 - clientId: string (client ID)
 - PAN: string (PAN number)  
 - name: string (user name)
 - mobile: string (mobile number)
 
+Parameters accepted for calculateAUM:
+- clientId: string (to calculate AUM for a specific client)
+- arn_id: number (to calculate AUM for an ARN/distributor)
+- agentCode: string (to calculate AUM by agent code)
+- data_type: string (e.g., "CAMS", "KARVY" to filter by type)
+
+Parameters accepted for getTransactionDetails:
+- clientId: string (client ID) [Required]
+- limit: number (number of transactions to fetch, default 10)
+- transactionType: string (e.g., "Purchase", "Redemption")
+- dateFrom: string (YYYY-MM-DD)
+- dateTo: string (YYYY-MM-DD)
+
 Format your response as:
 PLAN { "type": "plan", "plan": "description of what you'll do" }
-ACTION { "type": "action", "function": "getUserDetails", "input": {"parameter": "value"} }
+ACTION { "type": "action", "function": "functionName", "input": {"parameter": "value"} }
 
-Example:
-User: "Find user with PAN ABGPA5303H"
-PLAN { "type": "plan", "plan": "I will search for user using the PAN number" }
-ACTION { "type": "action", "function": "getUserDetails", "input": {"PAN": "ABGPA5303H"} }
+Example 1:
+User: "Calculate AUM for client ID 11181"
+PLAN { "type": "plan", "plan": "I will calculate AUM for the given client ID" }
+ACTION { "type": "action", "function": "calculateAUM", "input": {"clientId": "11181"} }
+
+Example 2:
+User: "Get last 20 transactions of client 11181"
+PLAN { "type": "plan", "plan": "I will fetch the last 20 transactions for the client" }
+ACTION { "type": "action", "function": "getTransactionDetails", "input": {"clientId": "11181", "limit": 20} }
 `;
 
 // System prompt for general queries
@@ -141,11 +164,16 @@ const parseAction = (message) => {
 const callFunction = async (functionName, input) => {
   switch (functionName) {
     case "getUserDetails":
-      return await getUserDetails(input);
+      return formatUserDetails(await getUserDetails(input));
+    case "calculateAUM":
+      return formatAUMDetails(await calculateAUM(input));
+    case "getTransactionDetails":
+      return formatTransactionDetails(await getTransactionDetails(input));
     default:
       throw new Error(`Unsupported function: ${functionName}`);
   }
 };
+
 
 const sendMessage = async (messages, systemPrompt) => {
   const response = await client.chat.completions.create({
@@ -179,10 +207,7 @@ const handleUserQuery = async (userPrompt) => {
     console.log("🔧 Executing function:", action.functionName);
     console.log("📥 With parameters:", action.input);
 
-    const observation = await callFunction(action.functionName, action.input);
-    console.log("🔍 Database Result:", observation);
-
-    const finalOutput = formatUserDetails(observation);
+    const finalOutput = await callFunction(action.functionName, action.input);
     console.log(finalOutput);
 
   } catch (error) {
@@ -192,15 +217,20 @@ const handleUserQuery = async (userPrompt) => {
   }
 };
 
-const handleGeneralQuery = async (userPrompt) => {
+const handleGeneralQuery = async (userPrompt, mode = "long") => {
   console.log("💭 Processing general knowledge query...");
-  
-  const messages = [
-    { role: "user", content: userPrompt },
-  ];
+
+  let systemPrompt = GENERAL_SYSTEM_PROMPT;
+  if (mode === "short") {
+    systemPrompt += `Answer as concisely as possible (1–2 sentences, direct fact).`;
+  } else {
+    systemPrompt += `Provide a detailed explanation (3–5 paragraphs if needed).`;
+  }
+
+  const messages = [{ role: "user", content: userPrompt }];
 
   try {
-    const response = await sendMessage(messages, GENERAL_SYSTEM_PROMPT);
+    const response = await sendMessage(messages, systemPrompt);
     console.log("🤖 AI Response:\n");
     console.log("=" + "=".repeat(50));
     console.log(response);
@@ -244,6 +274,31 @@ const formatUserDetails = (observation) => {
   return formattedResponse;
 };
 
+const formatAUMDetails = (observation) => {
+  if (!observation || observation.message) {
+    return `ℹ️ ${observation?.message || "No AUM data found."}`;
+  }
+
+  return `💰 Total AUM: ₹${observation.totalAUM.toFixed(2)} (across ${observation.count} records)`;
+};
+
+const formatTransactionDetails = (observation) => {
+  if (!observation || observation.message) {
+    return `ℹ️ ${observation?.message || "No transaction data found."}`;
+  }
+
+  let output = `📑 Transactions for Client ${observation.clientId}:\n\n`;
+  observation.transactions.forEach((t, i) => {
+    output += `#${i + 1} 🏦 ${t.fundDesc || "Unknown Fund"}\n`;
+    output += `   📅 Date: ${t.transDate || "N/A"} | 💰 Amount: ₹${t.amt || "N/A"}\n`;
+    output += `   🔹 Type: ${t.appTransDesc || t.appTransType || "N/A"} | Status: ${t.transStatus || "N/A"}\n`;
+    output += `   📄 Folio: ${t.folioNumber || "N/A"} | Units: ${t.unit || "N/A"} | NAV: ${t.nav || "N/A"}\n\n`;
+  });
+
+  return output;
+};
+
+
 const chat = async (userPrompt) => {
   console.log(`\n🟢 User: ${userPrompt}`);
 
@@ -252,8 +307,10 @@ const chat = async (userPrompt) => {
 
   if (queryType === "USER_QUERY") {
     await handleUserQuery(userPrompt);
+  } else if (queryType === "GENERAL_QUERY_SHORT") {
+    await handleGeneralQuery(userPrompt, "short");
   } else {
-    await handleGeneralQuery(userPrompt);
+    await handleGeneralQuery(userPrompt, "long");
   }
 };
 
@@ -262,7 +319,8 @@ const getUserInput = () => {
   console.log("   🔍 User Database Queries:");
   console.log("      • 'Find user with PAN ABGPA5303H'");
   console.log("      • 'Get details of user named John'");
-  console.log("      • 'Search user with mobile 9876543210'");
+  console.log("      • 'Search user with mobile 9827095272'");
+  console.log("      'get last 10 transaction clientId 102122'")
   console.log("   🧠 General Questions:");
   console.log("      • 'What is SIP?'");
   console.log("      • 'Explain mutual funds'");
@@ -273,17 +331,10 @@ const getUserInput = () => {
   return userPrompt.trim();
 };
 
-const main = async () => {
-  console.log("🚀 Starting Enhanced AI Chatbot...");
-  console.log("🤖 I can handle both database queries and general questions!");
-  
+const main = async () => {  
   try {
     // Connect to MongoDB
-    console.log("🔄 Connecting to MongoDB...");
     await connectToMongoDB();
-    console.log("✅ Connected to MongoDB successfully!");
-
-    console.log("\n🎉 Chatbot is ready! Let's start...");
 
     while (true) {
       try {

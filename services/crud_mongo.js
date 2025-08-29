@@ -119,7 +119,7 @@ const project_aggre = async (query_params) => {
 
 //For autoDD
 
-async function find_all2(query_params){
+export async function find_all2(query_params){
   const {modelName, where = {}, select = {}, sort = {}, limit = 0, skip = 0} = query_params;
   let collection = mongoose.connection.db.collection(modelName);
   let data = await collection.find(where, {projection:select, limit, sort, skip}).toArray();
