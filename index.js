@@ -10,154 +10,146 @@ dotenv.config();
 const MODEL = process.env.GROQ_MODEL || "llama3-8b-8192";
 const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// System prompt for determining query type
-const CLASSIFIER_PROMPT = `
-You are a query classifier. Analyze the user's question and determine:
+// Cache for storing recent responses to avoid duplicate API calls
+const responseCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-1. USER_QUERY → Questions about finding user details, client information, or database searches.
-   - Examples: "Find user with PAN ABGPA5303H", "Get details of Abhishek", "Search client by mobile"
+// Single unified system prompt that handles everything
+const UNIFIED_SYSTEM_PROMPT = `
+  You are an intelligent AI assistant that can handle both database queries and general knowledge questions.
 
-2. GENERAL_QUERY_SHORT → General knowledge questions where the answer is short, factual, or one-line.
-   - Examples: "What is India's prime minister name?", "Who is Elon Musk?", "What is 2+2?"
+  **AVAILABLE TOOLS:**
+  1. getUserDetails(params) - Search user database
+    Parameters: clientId, PAN, name, mobile
+  2. calculateAUM(params) - Calculate Assets Under Management  
+    Parameters: clientId, arn_id, agentCode
+  3. getTransactionDetails(params) - Get transaction history
+    Parameters: clientId (required), limit, transactionType, dateFrom, dateTo
 
-3. GENERAL_QUERY_LONG → General knowledge questions where the answer requires explanation or detail.
-   - Examples: "What is SIP?", "Explain mutual funds", "How does stock market work?"
+  **RESPONSE FORMAT:**
+  For database queries, respond with JSON:
+  {
+    "type": "database_query",
+    "function": "functionName",
+    "parameters": {...},
+    "explanation": "Brief explanation of what you're doing"
+  }
 
-Respond with ONLY one of these labels: "USER_QUERY", "GENERAL_QUERY_SHORT", or "GENERAL_QUERY_LONG"
+  For general questions, respond with JSON:
+  {
+    "type": "general_response", 
+    "answer": "Your complete answer here",
+    "mode": "short" | "detailed"
+  }
 
-User question: "{query}"
-`;
+  **EXAMPLES:**
 
-// System prompt for function-based user queries
-const USER_SYSTEM_PROMPT = `
-You are an AI assistant specialized in user database queries. Follow this process:
+  User: "Find user with PAN ABGPA5303H"
+  Response: {"type": "database_query", "function": "getUserDetails", "parameters": {"PAN": "ABGPA5303H"}, "explanation": "Searching for user with the provided PAN number"}
 
-1. PLAN the solution using available tools.
-2. Take ACTION with the appropriate tool.
-3. Provide OUTPUT based on observations.
+  User: "What is SIP?"
+  Response: {"type": "general_response", "answer": "SIP (Systematic Investment Plan) is a method of investing in mutual funds where you invest a fixed amount at regular intervals (monthly/quarterly). It helps in rupee cost averaging and disciplined investing.", "mode": "detailed"}
 
-Available tools:
-1. getUserDetails(params: object): object
-2. calculateAUM(params: object): object
-3. getTransactionDetails(params: object): object
+  User: "Who is the PM of India?"
+  Response: {"type": "general_response", "answer": "Narendra Modi is the current Prime Minister of India.", "mode": "short"}
 
-Parameters accepted for getUserDetails:
-- clientId: string (client ID)
-- PAN: string (PAN number)  
-- name: string (user name)
-- mobile: string (mobile number)
+  User: "Get last 5 transactions for client 11181"
+  Response: {"type": "database_query", "function": "getTransactionDetails", "parameters": {"clientId": "11181", "limit": 5}, "explanation": "Fetching the last 5 transactions for the specified client"}
 
-Parameters accepted for calculateAUM:
-- clientId: string (to calculate AUM for a specific client)
-- arn_id: number (to calculate AUM for an ARN/distributor)
-- agentCode: string (to calculate AUM by agent code)
-- data_type: string (e.g., "CAMS", "KARVY" to filter by type)
+  Always respond with valid JSON only.
+  `;
 
-Parameters accepted for getTransactionDetails:
-- clientId: string (client ID) [Required]
-- limit: number (number of transactions to fetch, default 10)
-- transactionType: string (e.g., "Purchase", "Redemption")
-- dateFrom: string (YYYY-MM-DD)
-- dateTo: string (YYYY-MM-DD)
+// Function to generate cache key
+const getCacheKey = (query) => {
+  return query.toLowerCase().trim().replace(/\s+/g, ' ');
+};
 
-Format your response as:
-PLAN { "type": "plan", "plan": "description of what you'll do" }
-ACTION { "type": "action", "function": "functionName", "input": {"parameter": "value"} }
+// Check cache before making API call
+const getCachedResponse = (query) => {
+  const key = getCacheKey(query);
+  const cached = responseCache.get(key);
+  
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    console.log("📋 Using cached response");
+    return cached.response;
+  }
+  
+  return null;
+};
 
-Example 1:
-User: "Calculate AUM for client ID 11181"
-PLAN { "type": "plan", "plan": "I will calculate AUM for the given client ID" }
-ACTION { "type": "action", "function": "calculateAUM", "input": {"clientId": "11181"} }
-
-Example 2:
-User: "Get last 20 transactions of client 11181"
-PLAN { "type": "plan", "plan": "I will fetch the last 20 transactions for the client" }
-ACTION { "type": "action", "function": "getTransactionDetails", "input": {"clientId": "11181", "limit": 20} }
-`;
-
-// System prompt for general queries
-const GENERAL_SYSTEM_PROMPT = `
-You are a helpful AI assistant that can answer general questions about finance, investments, business, technology, and other topics. 
-
-Provide clear, accurate, and helpful explanations. When explaining financial terms or concepts:
-- Give practical examples
-- Use simple language
-- Mention both benefits and risks where applicable
-- Provide actionable insights when relevant
-
-Be conversational and helpful. If you're not sure about something, acknowledge it.
-`;
-
-const classifyQuery = async (query) => {
-  try {
-    const prompt = CLASSIFIER_PROMPT.replace("{query}", query);
-    
-    const response = await client.chat.completions.create({
-      model: MODEL,
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.1,
-      max_tokens: 10,
-    });
-    
-    const classification = response.choices[0]?.message?.content?.trim();
-    console.log("🤖 Query classified as:", classification);
-    return classification;
-  } catch (error) {
-    console.error("Error classifying query:", error);
-    return "GENERAL_QUERY"; // Default to general query if classification fails
+// Store response in cache
+const setCachedResponse = (query, response) => {
+  const key = getCacheKey(query);
+  responseCache.set(key, {
+    response,
+    timestamp: Date.now()
+  });
+  
+  // Clean up old cache entries
+  if (responseCache.size > 100) {
+    const oldestKey = responseCache.keys().next().value;
+    responseCache.delete(oldestKey);
   }
 };
 
-const parseAction = (message) => {
+// Single API call to handle everything
+const processQuery = async (userPrompt) => {
   try {
-    console.log("Parsing action from message...");
-    
-    // Look for ACTION block in the message
-    const actionMatch = message.match(/ACTION\s*\{[^}]*"function":\s*"([^"]+)"[^}]*"input":\s*(\{[^}]*\}|\[[^\]]*\]|"[^"]*")[^}]*\}/);
-    
-    if (!actionMatch) {
-      console.log("No ACTION block found in message");
-      return null;
+    // Check cache first
+    const cachedResponse = getCachedResponse(userPrompt);
+    if (cachedResponse) {
+      return cachedResponse;
     }
 
-    const functionName = actionMatch[1];
-    let inputStr = actionMatch[2];
+    console.log("🔄 Making API call...");
     
-    console.log("Function name:", functionName);
-    console.log("Input string:", inputStr);
+    const response = await client.chat.completions.create({
+      model: MODEL,
+      messages: [
+        { role: "system", content: UNIFIED_SYSTEM_PROMPT },
+        { role: "user", content: userPrompt }
+      ],
+      temperature: 0.3,
+      max_tokens: 1000,
+    });
 
-    let inputParams = {};
+    const content = response.choices[0]?.message?.content?.trim();
     
-    try {
-      // Try to parse as JSON first
-      if (inputStr.startsWith('{') || inputStr.startsWith('[')) {
-        inputParams = JSON.parse(inputStr);
-      } else {
-        // If it's a simple string, try to extract parameter information
-        inputStr = inputStr.replace(/"/g, '').trim();
-        
-        // Auto-detect parameter type
-        if (/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(inputStr)) {
-          inputParams = { PAN: inputStr };
-        } else if (/^\d{10}$/.test(inputStr)) {
-          inputParams = { mobile: inputStr };
-        } else if (/^[A-Z0-9]+$/.test(inputStr) && inputStr.length > 3) {
-          inputParams = { clientId: inputStr };
-        } else {
-          inputParams = { name: inputStr };
-        }
-      }
-    } catch (parseError) {
-      console.error("Error parsing input parameters:", parseError);
-      return null;
+    // Cache the response
+    setCachedResponse(userPrompt, content);
+    
+    return content;
+  } catch (error) {
+    console.error("❌ API Error:", error.message);
+    throw error;
+  }
+};
+
+// Parse and execute the AI response
+const handleAIResponse = async (aiResponse, userPrompt) => {
+  try {
+    const parsedResponse = JSON.parse(aiResponse);
+    
+    if (parsedResponse.type === "database_query") {
+      console.log("🔧 Executing:", parsedResponse.explanation);
+      console.log("🎯 Function:", parsedResponse.function);
+      console.log("📥 Parameters:", parsedResponse.parameters);
+      
+      const result = await callFunction(parsedResponse.function, parsedResponse.parameters);
+      console.log(result);
+      
+    } else if (parsedResponse.type === "general_response") {
+      console.log("🤖 AI Response:\n");
+      console.log("=" + "=".repeat(50));
+      console.log(parsedResponse.answer);
+      console.log("=" + "=".repeat(50));
     }
-
-    console.log("Parsed parameters:", inputParams);
-    return { functionName, input: inputParams };
     
-  } catch (err) {
-    console.error("Error parsing action:", err);
-    return null;
+  } catch (parseError) {
+    console.log("⚠️  Received non-JSON response, treating as general answer:");
+    console.log("=" + "=".repeat(50));
+    console.log(aiResponse);
+    console.log("=" + "=".repeat(50));
   }
 };
 
@@ -174,71 +166,32 @@ const callFunction = async (functionName, input) => {
   }
 };
 
+// Enhanced parameter detection for better accuracy
+const detectParameters = (query) => {
+  const patterns = {
+    PAN: /\b[A-Z]{5}[0-9]{4}[A-Z]\b/g,
+    mobile: /\b\d{10}\b/g,
+    clientId: /\b(?:client\s*(?:id|ID)\s*)?([A-Z0-9]{4,})\b/gi,
+    limit: /\b(?:last|first)\s*(\d+)\b/gi,
+    transactionType: /\b(purchase|redemption|dividend|switch)\b/gi
+  };
 
-const sendMessage = async (messages, systemPrompt) => {
-  const response = await client.chat.completions.create({
-    model: MODEL,
-    messages: [
-      { role: "system", content: systemPrompt },
-      ...messages
-    ],
-    temperature: 0.7,
-  });
-  return response.choices[0]?.message?.content?.trim();
-};
-
-const handleUserQuery = async (userPrompt) => {
-  console.log("🔍 Processing user database query...");
+  const detected = {};
   
-  const messages = [
-    { role: "user", content: userPrompt },
-  ];
-
-  try {
-    const planningResponse = await sendMessage(messages, USER_SYSTEM_PROMPT);
-    console.log("🧠 AI Planning Response:\n", planningResponse);
-
-    const action = parseAction(planningResponse);
-    if (!action) {
-      console.log("❌ No valid ACTION step found. Treating as general query.");
-      return await handleGeneralQuery(userPrompt);
+  for (const [type, pattern] of Object.entries(patterns)) {
+    const matches = query.match(pattern);
+    if (matches) {
+      if (type === 'limit') {
+        detected[type] = parseInt(matches[0].match(/\d+/)[0]);
+      } else if (type === 'clientId') {
+        detected[type] = matches[0].replace(/client\s*(?:id|ID)\s*/gi, '').trim();
+      } else {
+        detected[type] = matches[0];
+      }
     }
-
-    console.log("🔧 Executing function:", action.functionName);
-    console.log("📥 With parameters:", action.input);
-
-    const finalOutput = await callFunction(action.functionName, action.input);
-    console.log(finalOutput);
-
-  } catch (error) {
-    console.error("❌ User Query Error:", error.message);
-    console.log("💡 Falling back to general query handling...");
-    await handleGeneralQuery(userPrompt);
   }
-};
-
-const handleGeneralQuery = async (userPrompt, mode = "long") => {
-  console.log("💭 Processing general knowledge query...");
-
-  let systemPrompt = GENERAL_SYSTEM_PROMPT;
-  if (mode === "short") {
-    systemPrompt += `Answer as concisely as possible (1–2 sentences, direct fact).`;
-  } else {
-    systemPrompt += `Provide a detailed explanation (3–5 paragraphs if needed).`;
-  }
-
-  const messages = [{ role: "user", content: userPrompt }];
-
-  try {
-    const response = await sendMessage(messages, systemPrompt);
-    console.log("🤖 AI Response:\n");
-    console.log("=" + "=".repeat(50));
-    console.log(response);
-    console.log("=" + "=".repeat(50));
-  } catch (error) {
-    console.error("❌ General Query Error:", error.message);
-    console.log("Sorry, I couldn't process your question right now. Please try again.");
-  }
+  
+  return detected;
 };
 
 const formatUserDetails = (observation) => {
@@ -251,7 +204,7 @@ const formatUserDetails = (observation) => {
   }
 
   const { name, DOB, city, pan, mobile, email, address } = observation;
-  
+
   if (!name) {
     return "❌ Sorry, no user details were found.";
   }
@@ -263,7 +216,7 @@ const formatUserDetails = (observation) => {
   if (age !== "N/A") formattedResponse += ` (${age} years old)`;
   if (city) formattedResponse += ` from ${city}`;
   formattedResponse += `\n\n📋 Complete Information:\n`;
-  
+
   if (DOB) formattedResponse += `📅 Date of Birth: ${DOB}\n`;
   if (address) formattedResponse += `🏠 Address: ${address}\n`;
   if (city) formattedResponse += `🌆 City: ${city}\n`;
@@ -298,19 +251,17 @@ const formatTransactionDetails = (observation) => {
   return output;
 };
 
-
 const chat = async (userPrompt) => {
   console.log(`\n🟢 User: ${userPrompt}`);
-
-  // Classify the query first
-  const queryType = await classifyQuery(userPrompt);
-
-  if (queryType === "USER_QUERY") {
-    await handleUserQuery(userPrompt);
-  } else if (queryType === "GENERAL_QUERY_SHORT") {
-    await handleGeneralQuery(userPrompt, "short");
-  } else {
-    await handleGeneralQuery(userPrompt, "long");
+  
+  try {
+    // Single API call to process everything
+    const aiResponse = await processQuery(userPrompt);
+    await handleAIResponse(aiResponse, userPrompt);
+    
+  } catch (error) {
+    console.error("❌ Error processing request:", error.message);
+    console.log("💡 Please try again with a different question.");
   }
 };
 
@@ -320,40 +271,82 @@ const getUserInput = () => {
   console.log("      • 'Find user with PAN ABGPA5303H'");
   console.log("      • 'Get details of user named John'");
   console.log("      • 'Search user with mobile 9827095272'");
-  console.log("      'get last 10 transaction clientId 102122'")
+  console.log("      • 'Get last 10 transactions for client 102122'");
+  console.log("      • 'Calculate AUM for client 11181'");
   console.log("   🧠 General Questions:");
   console.log("      • 'What is SIP?'");
   console.log("      • 'Explain mutual funds'");
   console.log("      • 'How does stock market work?'");
   console.log("   📝 Type 'exit' or 'quit' to close\n");
-  
+
   const userPrompt = readlineSync.question(">> ");
   return userPrompt.trim();
 };
 
-const main = async () => {  
+// Batch processing for multiple queries (optional enhancement)
+const processBatchQueries = async (queries) => {
+  console.log(`🔄 Processing ${queries.length} queries in batch...`);
+  
+  const promises = queries.map(query => processQuery(query));
+  const responses = await Promise.all(promises);
+  
+  return responses;
+};
+
+// Add connection pooling and error recovery
+let connectionAttempts = 0;
+const MAX_CONNECTION_ATTEMPTS = 3;
+
+const connectWithRetry = async () => {
+  while (connectionAttempts < MAX_CONNECTION_ATTEMPTS) {
+    try {
+      await connectToMongoDB();
+      console.log("✅ Connected to MongoDB");
+      return;
+    } catch (error) {
+      connectionAttempts++;
+      console.log(`⚠️  Connection attempt ${connectionAttempts} failed: ${error.message}`);
+      
+      if (connectionAttempts < MAX_CONNECTION_ATTEMPTS) {
+        console.log(`🔄 Retrying in 2 seconds...`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
+  }
+  throw new Error("Failed to connect to MongoDB after multiple attempts");
+};
+
+const main = async () => {
   try {
-    // Connect to MongoDB
-    await connectToMongoDB();
+    // Connect to MongoDB with retry logic
+    await connectWithRetry();
+    
+    // Clear cache on startup
+    responseCache.clear();
+    
+    console.log("🚀 AI Chatbot started successfully!");
+    console.log("💡 Optimizations enabled: Response caching, Single API calls");
 
     while (true) {
       try {
         const userPrompt = getUserInput();
-        
+
         if (userPrompt.toLowerCase() === 'exit' || userPrompt.toLowerCase() === 'quit') {
           console.log("👋 Thank you for using the AI Chatbot! Goodbye!");
+          console.log(`📊 Cache stats: ${responseCache.size} cached responses`);
           process.exit(0);
         }
-        
+
         if (userPrompt.trim() === '') {
           console.log("⚠️  Please enter a valid question.");
           continue;
         }
 
+        // Process with optimized single API call
         await chat(userPrompt);
-        
+
         console.log("\n" + "─".repeat(60) + "\n");
-        
+
       } catch (error) {
         console.error("❌ Error processing your request:", error.message);
         console.log("💡 Please try again with a different question.");
@@ -364,6 +357,13 @@ const main = async () => {
     process.exit(1);
   }
 };
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log("\n📊 Final cache stats:", responseCache.size, "cached responses");
+  console.log("👋 Shutting down gracefully...");
+  process.exit(0);
+});
 
 // Start the application
 main().catch(console.error);

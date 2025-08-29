@@ -8,7 +8,7 @@ export const getUserDetails = async (params) => {
     query.ID = params.clientId;
   }
   if (params.PAN) {
-    query.pan = params.PAN;
+    query.pan = { $regex: new RegExp(params.PAN, "i") };
   }
   if (params.name) {
     query.name = { $regex: new RegExp(params.name, "i") };
@@ -60,9 +60,6 @@ export const calculateAUM = async (params) => {
   if (params.clientId) {
     query.ID = params.clientId;
   }
-  if (params.data_type) {
-    query.data_type = params.data_type;
-  }
 
   const param = {
     modelName: "present_day_summary",
@@ -76,7 +73,7 @@ export const calculateAUM = async (params) => {
 
   try {
     // Fetch all matching records (not just one)
-    const records = await find_all2(param); // <-- use find_all2 (like find_one2 but returns array)
+    const records = await find_all2(param);
 
     if (!records || records.length === 0) {
       console.log("No records found for the given parameters:", params);
@@ -169,15 +166,4 @@ export const getTransactionDetails = async (params) => {
     console.error("Error fetching transaction details:", error.message);
     return { message: "Error fetching transaction details." };
   }
-};
-
-// Alternative function if you want to specifically get last N transactions
-export const getLastNTransactions = async (clientId, count = 10) => {
-  if (!clientId) {
-    return { message: "Client ID is required." };
-  }
-  return await getTransactionDetails({
-    clientId: clientId,
-    limit: count
-  });
 };
