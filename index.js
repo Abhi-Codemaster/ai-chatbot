@@ -358,12 +358,6 @@ const main = async () => {
   }
 };
 
-// Graceful shutdown
-process.on('SIGINT', () => {
-  console.log("\n📊 Final cache stats:", responseCache.size, "cached responses");
-  console.log("👋 Shutting down gracefully...");
-  process.exit(0);
-});
 
 // Start the application
 main().catch(console.error);
