@@ -1,108 +1,40 @@
 import dotenv from "dotenv";
 import Groq from "groq-sdk";
+import express from 'express';
+import cors from 'cors';
 import { getUserDetails, calculateAUM, getTransactionDetails } from "./controllers/aiController.js";
 import connectToMongoDB from "./services/conn_mongo.js";
 import readlineSync from "readline-sync";
 import { calculateAge } from "./common/common.js";
+import {UNIFIED_SYSTEM_PROMPT} from "./prompts/systemPrompts.js";
+import {getCachedResponse,setCachedResponse,clearResponseCache} from "./helpers/chatData.js";
 
 dotenv.config();
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+//connect to MongoDB
+await connectToMongoDB();
+
+clearResponseCache();
+
+app.use(cors());
+app.use(express.json());
 
 const MODEL = process.env.GROQ_MODEL || "llama3-8b-8192";
 const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// Cache for storing recent responses to avoid duplicate API calls
-const responseCache = new Map();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
-// Single unified system prompt that handles everything
-const UNIFIED_SYSTEM_PROMPT = `
-  You are an intelligent AI assistant that can handle both database queries and general knowledge questions.
-
-  **AVAILABLE TOOLS:**
-  1. getUserDetails(params) - Search user database
-    Parameters: clientId, PAN, name, mobile
-  2. calculateAUM(params) - Calculate Assets Under Management  
-    Parameters: clientId, arn_id, agentCode
-  3. getTransactionDetails(params) - Get transaction history
-    Parameters: clientId (required), limit, transactionType, dateFrom, dateTo
-
-  **RESPONSE FORMAT:**
-  For database queries, respond with JSON:
-  {
-    "type": "database_query",
-    "function": "functionName",
-    "parameters": {...},
-    "explanation": "Brief explanation of what you're doing"
-  }
-
-  For general questions, respond with JSON:
-  {
-    "type": "general_response", 
-    "answer": "Your complete answer here",
-    "mode": "short" | "detailed"
-  }
-
-  **EXAMPLES:**
-
-  User: "Find user with PAN ABGPA5303H"
-  Response: {"type": "database_query", "function": "getUserDetails", "parameters": {"PAN": "ABGPA5303H"}, "explanation": "Searching for user with the provided PAN number"}
-
-  User: "What is SIP?"
-  Response: {"type": "general_response", "answer": "SIP (Systematic Investment Plan) is a method of investing in mutual funds where you invest a fixed amount at regular intervals (monthly/quarterly). It helps in rupee cost averaging and disciplined investing.", "mode": "detailed"}
-
-  User: "Who is the PM of India?"
-  Response: {"type": "general_response", "answer": "Narendra Modi is the current Prime Minister of India.", "mode": "short"}
-
-  User: "Get last 5 transactions for client 11181"
-  Response: {"type": "database_query", "function": "getTransactionDetails", "parameters": {"clientId": "11181", "limit": 5}, "explanation": "Fetching the last 5 transactions for the specified client"}
-
-  Always respond with valid JSON only.
-  `;
-
-// Function to generate cache key
-const getCacheKey = (query) => {
-  return query.toLowerCase().trim().replace(/\s+/g, ' ');
-};
-
-// Check cache before making API call
-const getCachedResponse = (query) => {
-  const key = getCacheKey(query);
-  const cached = responseCache.get(key);
-  
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    console.log("📋 Using cached response");
-    return cached.response;
-  }
-  
-  return null;
-};
-
-// Store response in cache
-const setCachedResponse = (query, response) => {
-  const key = getCacheKey(query);
-  responseCache.set(key, {
-    response,
-    timestamp: Date.now()
-  });
-  
-  // Clean up old cache entries
-  if (responseCache.size > 100) {
-    const oldestKey = responseCache.keys().next().value;
-    responseCache.delete(oldestKey);
-  }
-};
-
-// Single API call to handle everything
 const processQuery = async (userPrompt) => {
   try {
     // Check cache first
     const cachedResponse = getCachedResponse(userPrompt);
+    console.log("check tt=>", cachedResponse);
     if (cachedResponse) {
+      console.log("📋 Using cached response");
       return cachedResponse;
     }
 
     console.log("🔄 Making API call...");
-    
     const response = await client.chat.completions.create({
       model: MODEL,
       messages: [
@@ -114,16 +46,14 @@ const processQuery = async (userPrompt) => {
     });
 
     const content = response.choices[0]?.message?.content?.trim();
-    
-    // Cache the response
     setCachedResponse(userPrompt, content);
-    
     return content;
   } catch (error) {
     console.error("❌ API Error:", error.message);
     throw error;
   }
 };
+
 
 // Parse and execute the AI response
 const handleAIResponse = async (aiResponse, userPrompt) => {
@@ -136,13 +66,10 @@ const handleAIResponse = async (aiResponse, userPrompt) => {
       console.log("📥 Parameters:", parsedResponse.parameters);
       
       const result = await callFunction(parsedResponse.function, parsedResponse.parameters);
-      console.log(result);
+      return result;
       
     } else if (parsedResponse.type === "general_response") {
-      console.log("🤖 AI Response:\n");
-      console.log("=" + "=".repeat(50));
-      console.log(parsedResponse.answer);
-      console.log("=" + "=".repeat(50));
+      return parsedResponse.answer;
     }
     
   } catch (parseError) {
@@ -240,16 +167,50 @@ const formatTransactionDetails = (observation) => {
     return `ℹ️ ${observation?.message || "No transaction data found."}`;
   }
 
-  let output = `📑 Transactions for Client ${observation.clientId}:\n\n`;
+  let output = `📑 Transactions for Client ${observation.clientId}:\n`;
+
   observation.transactions.forEach((t, i) => {
-    output += `#${i + 1} 🏦 ${t.fundDesc || "Unknown Fund"}\n`;
-    output += `   📅 Date: ${t.transDate || "N/A"} | 💰 Amount: ₹${t.amt || "N/A"}\n`;
-    output += `   🔹 Type: ${t.appTransDesc || t.appTransType || "N/A"} | Status: ${t.transStatus || "N/A"}\n`;
-    output += `   📄 Folio: ${t.folioNumber || "N/A"} | Units: ${t.unit || "N/A"} | NAV: ${t.nav || "N/A"}\n\n`;
+    output += `\n#${i + 1} 🏦 ${t.fundDesc || "Unknown Fund"}\n`;
+    output += `📅 ${t.transDate || "N/A"} | 💰 ₹${t.amt || "N/A"} | 🔹 ${t.appTransDesc || t.appTransType || "N/A"}\n`;
+    output += `📄 ${t.folioNumber || "N/A"} | 🔢 ${t.unit || "N/A"} | 📈 ${t.nav || "N/A"} | 📊 ${t.transStatus || "N/A"}\n`;
+    output += `───────────────\n`;
   });
 
   return output;
 };
+
+// const formatTransactionDetails = (observation) => {
+//   if (!observation || observation.message) {
+//     return {
+//       text: `ℹ️ ${observation?.message || "No transaction data found."}`,
+//       html: `<p>ℹ️ ${observation?.message || "No transaction data found."}</p>`
+//     };
+//   }
+
+//   let textOutput = `📑 Transactions for Client ${observation.clientId}:\n`;
+//   let htmlOutput = `<h3>📑 Transactions for Client ${observation.clientId}:</h3>`;
+
+//   observation.transactions.forEach((t, i) => {
+//     // Text (with \n newlines)
+//     textOutput += `\n#${i + 1} 🏦 ${t.fundDesc || "Unknown Fund"}\n`;
+//     textOutput += `📅 ${t.transDate || "N/A"} | 💰 ₹${t.amt || "N/A"} | 🔹 ${t.appTransDesc || t.appTransType || "N/A"}\n`;
+//     textOutput += `📄 ${t.folioNumber || "N/A"} | 🔢 ${t.unit || "N/A"} | 📈 ${t.nav || "N/A"} | 📊 ${t.transStatus || "N/A"}\n`;
+//     textOutput += `───────────────\n`;
+
+//     // HTML (with <br> line breaks)
+//     htmlOutput += `<div style="margin-bottom:10px;">
+//       <strong>#${i + 1}</strong> 🏦 ${t.fundDesc || "Unknown Fund"}<br>
+//       📅 ${t.transDate || "N/A"} | 💰 ₹${t.amt || "N/A"} | 🔹 ${t.appTransDesc || t.appTransType || "N/A"}<br>
+//       📄 ${t.folioNumber || "N/A"} | 🔢 ${t.unit || "N/A"} | 📈 ${t.nav || "N/A"} | 📊 ${t.transStatus || "N/A"}<br>
+//       <hr>
+//     </div>`;
+//   });
+
+//   // return { text: textOutput, html: htmlOutput };
+//   return htmlOutput;
+// };
+
+
 
 const chat = async (userPrompt) => {
   console.log(`\n🟢 User: ${userPrompt}`);
@@ -257,7 +218,7 @@ const chat = async (userPrompt) => {
   try {
     // Single API call to process everything
     const aiResponse = await processQuery(userPrompt);
-    await handleAIResponse(aiResponse, userPrompt);
+    return await handleAIResponse(aiResponse, userPrompt);
     
   } catch (error) {
     console.error("❌ Error processing request:", error.message);
@@ -265,105 +226,53 @@ const chat = async (userPrompt) => {
   }
 };
 
-const getUserInput = () => {
-  console.log("\n💬 Ask me anything! I can help with:");
-  console.log("   🔍 User Database Queries:");
-  console.log("      • 'Find user with PAN ABGPA5303H'");
-  console.log("      • 'Get details of user named John'");
-  console.log("      • 'Search user with mobile 9827095272'");
-  console.log("      • 'Get last 10 transactions for client 102122'");
-  console.log("      • 'Calculate AUM for client 11181'");
-  console.log("   🧠 General Questions:");
-  console.log("      • 'What is SIP?'");
-  console.log("      • 'Explain mutual funds'");
-  console.log("      • 'How does stock market work?'");
-  console.log("   📝 Type 'exit' or 'quit' to close\n");
 
-  const userPrompt = readlineSync.question(">> ");
-  return userPrompt.trim();
-};
-
-// Batch processing for multiple queries (optional enhancement)
-const processBatchQueries = async (queries) => {
-  console.log(`🔄 Processing ${queries.length} queries in batch...`);
-  
-  const promises = queries.map(query => processQuery(query));
-  const responses = await Promise.all(promises);
-  
-  return responses;
-};
-
-// Add connection pooling and error recovery
-let connectionAttempts = 0;
-const MAX_CONNECTION_ATTEMPTS = 3;
-
-const connectWithRetry = async () => {
-  while (connectionAttempts < MAX_CONNECTION_ATTEMPTS) {
-    try {
-      await connectToMongoDB();
-      console.log("✅ Connected to MongoDB");
-      return;
-    } catch (error) {
-      connectionAttempts++;
-      console.log(`⚠️  Connection attempt ${connectionAttempts} failed: ${error.message}`);
-      
-      if (connectionAttempts < MAX_CONNECTION_ATTEMPTS) {
-        console.log(`🔄 Retrying in 2 seconds...`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      }
-    }
-  }
-  throw new Error("Failed to connect to MongoDB after multiple attempts");
-};
-
-const main = async () => {
+app.post('/api/chat', async (req, res) => {
   try {
-    // Connect to MongoDB with retry logic
-    await connectWithRetry();
-    
-    // Clear cache on startup
-    responseCache.clear();
-    
-    console.log("🚀 AI Chatbot started successfully!");
-    console.log("💡 Optimizations enabled: Response caching, Single API calls");
+    const { message } = req.body;
 
-    while (true) {
-      try {
-        const userPrompt = getUserInput();
-
-        if (userPrompt.toLowerCase() === 'exit' || userPrompt.toLowerCase() === 'quit') {
-          console.log("👋 Thank you for using the AI Chatbot! Goodbye!");
-          console.log(`📊 Cache stats: ${responseCache.size} cached responses`);
-          process.exit(0);
-        }
-
-        if (userPrompt.trim() === '') {
-          console.log("⚠️  Please enter a valid question.");
-          continue;
-        }
-
-        // Process with optimized single API call
-        await chat(userPrompt);
-
-        console.log("\n" + "─".repeat(60) + "\n");
-
-      } catch (error) {
-        console.error("❌ Error processing your request:", error.message);
-        console.log("💡 Please try again with a different question.");
-      }
+    if (!message || typeof message !== 'string' || message.trim().length === 0) {
+      return res.status(400).json({
+        error: 'Message is required and must be a non-empty string'
+      });
     }
-  } catch (error) {
-    console.error("❌ Application Error:", error.message);
-    process.exit(1);
-  }
-};
 
-// Graceful shutdown
-process.on('SIGINT', () => {
-  console.log("\n📊 Final cache stats:", responseCache.size, "cached responses");
-  console.log("👋 Shutting down gracefully...");
-  process.exit(0);
+    console.log(`\n🟢 User: ${message}`);
+
+    // Simulate processing delay
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    // Simple keyword matching for demo
+    let lowerMessage = message.toLowerCase().trim();
+    const response = await chat(lowerMessage);
+
+    res.json({
+      response: response,
+      timestamp: new Date().toISOString(),
+      processed: true
+    });
+
+  } catch (error) {
+    console.error('❌ Chat API Error:', error.message);
+    
+    res.status(500).json({
+      error: 'I apologize, but I encountered an error while processing your request. Please try again.',
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
-// Start the application
-main().catch(console.error);
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`\n🚀 AI Chatbot API Server started successfully!`);
+  console.log(`📡 Server running on http://localhost:${PORT}`);
+  console.log(`🔗 API Endpoint: http://localhost:${PORT}/api/chat`);
+  console.log(`\n📋 Available Test Queries:`);
+  console.log(`   • "Find user with PAN ABGPA5303H"`);
+  console.log(`   • "What is SIP?"`);
+  console.log(`   • "Calculate AUM for client 11181"`);
+  console.log(`   • "Explain mutual funds"`);
+  console.log(`   • "Get transaction history"`);
+  console.log(`\n✨ Ready to accept requests!\n`);
+});

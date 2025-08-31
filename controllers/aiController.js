@@ -99,7 +99,7 @@ export const calculateAUM = async (params) => {
 };
 
 export const getTransactionDetails = async (params) => {
-  const { clientId, limit = 10, transactionType, dateFrom, dateTo } = params;
+  const { clientId, limit, transactionType, dateFrom, dateTo } = params;
   if (!clientId) {
     return { message: "Client ID is required to fetch transactions." };
   }
@@ -121,7 +121,7 @@ export const getTransactionDetails = async (params) => {
     }
   }
   const param = {
-    modelName: "transaction_batch", // Replace with your actual transaction collection name
+    modelName: "transaction_batch",
     where: query,
     select: {
       _id: 1,
