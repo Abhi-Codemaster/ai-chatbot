@@ -21,7 +21,7 @@ clearResponseCache();
 app.use(cors());
 app.use(express.json());
 
-const MODEL = process.env.GROQ_MODEL || "llama3-8b-8192";
+const MODEL = process.env.GROQ_MODEL;
 const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const processQuery = async (userPrompt) => {
@@ -56,9 +56,41 @@ const processQuery = async (userPrompt) => {
 
 
 // Parse and execute the AI response
+// const handleAIResponse = async (aiResponse, userPrompt) => {
+//   try {
+//     const parsedResponse = JSON.parse(aiResponse);
+    
+//     if (parsedResponse.type === "database_query") {
+//       console.log("🔧 Executing:", parsedResponse.explanation);
+//       console.log("🎯 Function:", parsedResponse.function);
+//       console.log("📥 Parameters:", parsedResponse.parameters);
+      
+//       const result = await callFunction(parsedResponse.function, parsedResponse.parameters);
+//       return result;
+      
+//     } else if (parsedResponse.type === "general_response") {
+//       return parsedResponse.answer;
+//     }
+    
+//   } catch (parseError) {
+//     console.log("⚠️  Received non-JSON response, treating as general answer:");
+//     console.log("=" + "=".repeat(50));
+//     console.log(aiResponse);
+//     console.log("=" + "=".repeat(50));
+//   }
+// };
+
 const handleAIResponse = async (aiResponse, userPrompt) => {
   try {
-    const parsedResponse = JSON.parse(aiResponse);
+    // Extract JSON substring inside aiResponse
+    const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      // No JSON found, return full aiResponse as fallback
+      return aiResponse;
+    }
+    
+    const jsonStr = jsonMatch[0];
+    const parsedResponse = JSON.parse(jsonStr);
     
     if (parsedResponse.type === "database_query") {
       console.log("🔧 Executing:", parsedResponse.explanation);
@@ -70,6 +102,9 @@ const handleAIResponse = async (aiResponse, userPrompt) => {
       
     } else if (parsedResponse.type === "general_response") {
       return parsedResponse.answer;
+    } else {
+      // If type is unknown, return whole answer field or fallback
+      return parsedResponse.answer || aiResponse;
     }
     
   } catch (parseError) {
@@ -77,8 +112,10 @@ const handleAIResponse = async (aiResponse, userPrompt) => {
     console.log("=" + "=".repeat(50));
     console.log(aiResponse);
     console.log("=" + "=".repeat(50));
+    return aiResponse;  // Return the raw response as fallback
   }
 };
+
 
 const callFunction = async (functionName, input) => {
   switch (functionName) {

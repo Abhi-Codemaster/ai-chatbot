@@ -25,8 +25,10 @@ export const UNIFIED_SYSTEM_PROMPT = `
     "answer": "Your complete answer here",
     "mode": "short" | "detailed"
   }
-
+  
   **EXAMPLES:**
+  User: "Calculate AUM 8733"
+  Response: { "type": "database_query", "function": "calculateAUM", "parameters": { "clientId": "8733" }, "explanation": "Calculating AUM for client with ID 8733"}
 
   User: "Find user with PAN ABGPA5303H"
   Response: {"type": "database_query", "function": "getUserDetails", "parameters": {"PAN": "ABGPA5303H"}, "explanation": "Searching for user with the provided PAN number"}

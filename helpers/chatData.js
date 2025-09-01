@@ -9,12 +9,9 @@ const getCacheKey = (query) => {
 
 // Check cache before making API call
 export const getCachedResponse = (query) => {
-  console.log("get key", query)
   const key = getCacheKey(query);
   const cached = responseCache.get(key);
-console.log("cached data=>",cached);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    console.log("📋 Using cached response");
     return cached.response;
   }
   
@@ -23,8 +20,6 @@ console.log("cached data=>",cached);
 
 // Store response in cache
 export const setCachedResponse = (query, response) => {
-  console.log("set key", query)
-  console.log("set value", response)
   const key = getCacheKey(query);
   responseCache.set(key, {
     response,
